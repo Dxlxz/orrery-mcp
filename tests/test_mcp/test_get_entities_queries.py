@@ -1,0 +1,269 @@
+"""
+Unit tests for Query entity handling in get_entities().
+"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+from orrery.ingestion.graph.client import OrreryGraph
+from orrery.sdk.main_client import OrreryClient
+
+from orrery_integrations.mcp.mcp_server import get_entities, with_orrery_client
+
+
+@pytest.fixture
+def mock_client():
+    """Create a mock Orrery client for testing."""
+    graph = MagicMock(spec=OrreryGraph)
+    graph._gms_server = "http://localhost:8080"
+    graph.frontend_base_url = "http://localhost:9002"
+    client = MagicMock(spec=OrreryClient)
+    client._graph = graph
+    return client
+
+
+def test_get_entities_with_query_urn(mock_client):
+    """Test that get_entities() correctly handles Query URNs."""
+
+    query_urn = "urn:li:query:abc123"
+
+    # Mock QueryEntity response
+    mock_response = {
+        "entity": {
+            "urn": query_urn,
+            "type": "QUERY",
+            "properties": {
+                "name": "Test Query",
+                "description": "A test query",
+                "source": "SYSTEM",
+                "statement": {
+                    "value": "SELECT * FROM table",
+                    "language": "SQL",
+                },
+                "lastModified": {
+                    "actor": "urn:li:corpuser:orrery",
+                },
+            },
+            "platform": {
+                "urn": "urn:li:dataPlatform:snowflake",
+                "name": "snowflake",
+            },
+            "subjects": [
+                {
+                    "dataset": {
+                        "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,db.table,PROD)",
+                        "name": "table",
+                    }
+                }
+            ],
+        }
+    }
+
+    mock_client._graph.exists.return_value = True
+    mock_client._graph.url_for = lambda x: f"https://example.com/{x}"
+
+    with patch(
+        "orrery_integrations.mcp.graphql_helpers.execute_graphql",
+        side_effect=[mock_response, {"entity": {}}],
+    ) as mock_gql:
+        with with_orrery_client(mock_client):
+            result = get_entities(query_urn)
+
+    # Verify it used GetQueryEntity operation (first call)
+    assert mock_gql.call_count == 2
+    call_kwargs = mock_gql.call_args_list[0][1]
+    assert call_kwargs["operation_name"] == "GetQueryEntity"
+
+    # Verify response structure
+    assert result["urn"] == query_urn
+    assert result["type"] == "QUERY"
+    assert result["properties"]["source"] == "SYSTEM"
+    assert result["properties"]["statement"]["value"] == "SELECT * FROM table"
+    assert result["properties"]["statement"]["language"] == "SQL"
+    assert result["platform"]["name"] == "snowflake"
+    assert len(result["subjects"]) == 1
+
+
+def test_get_entities_with_dataset_urn(mock_client):
+    """Test that get_entities() uses GetEntity for non-Query URNs."""
+
+    dataset_urn = "urn:li:dataset:(urn:li:dataPlatform:snowflake,db.table,PROD)"
+
+    # Mock Dataset response
+    mock_response = {
+        "entity": {
+            "urn": dataset_urn,
+            "type": "DATASET",
+            "name": "table",
+            "properties": {
+                "name": "table",
+                "description": "A test table",
+            },
+        }
+    }
+
+    mock_client._graph.exists.return_value = True
+    mock_client._graph.url_for = lambda x: f"https://example.com/{x}"
+
+    with patch(
+        "orrery_integrations.mcp.graphql_helpers.execute_graphql",
+        side_effect=[mock_response, {"entity": {}}],
+    ) as mock_gql:
+        with with_orrery_client(mock_client):
+            result = get_entities(dataset_urn)
+
+    # Verify it used GetEntity operation (not GetQueryEntity) (first call)
+    assert mock_gql.call_count == 2
+    call_kwargs = mock_gql.call_args_list[0][1]
+    assert call_kwargs["operation_name"] == "GetEntity"
+
+    # Verify response
+    assert result["urn"] == dataset_urn
+    assert result["type"] == "DATASET"
+
+
+def test_get_entities_mixed_urns(mock_client):
+    """Test that get_entities() handles mixed URN types (query + dataset)."""
+
+    query_urn = "urn:li:query:abc123"
+    dataset_urn = "urn:li:dataset:(urn:li:dataPlatform:snowflake,db.table,PROD)"
+
+    # Mock responses
+    query_response = {
+        "entity": {
+            "urn": query_urn,
+            "type": "QUERY",
+            "properties": {
+                "source": "SYSTEM",
+                "statement": {"value": "SELECT 1", "language": "SQL"},
+            },
+            "platform": {"name": "snowflake"},
+            "subjects": [],
+        }
+    }
+
+    dataset_response = {
+        "entity": {
+            "urn": dataset_urn,
+            "type": "DATASET",
+            "name": "table",
+            "properties": {"name": "table"},
+        }
+    }
+
+    mock_client._graph.exists.return_value = True
+    mock_client._graph.url_for = lambda x: f"https://example.com/{x}"
+
+    with patch(
+        "orrery_integrations.mcp.graphql_helpers.execute_graphql",
+        side_effect=[
+            query_response,
+            {"entity": {}},
+            dataset_response,
+            {"entity": {}},
+        ],
+    ) as mock_gql:
+        with with_orrery_client(mock_client):
+            results = get_entities([query_urn, dataset_urn])
+
+    # Verify four operations were called (2 entities + 2 related docs queries)
+    assert mock_gql.call_count == 4
+
+    # First call should be GetQueryEntity
+    first_call_kwargs = mock_gql.call_args_list[0][1]
+    assert first_call_kwargs["operation_name"] == "GetQueryEntity"
+
+    # Third call should be GetEntity
+    third_call_kwargs = mock_gql.call_args_list[2][1]
+    assert third_call_kwargs["operation_name"] == "GetEntity"
+
+    # Verify results
+    assert len(results) == 2
+    assert results[0]["type"] == "QUERY"
+    assert results[1]["type"] == "DATASET"
+
+
+def test_get_entities_query_urn_edge_cases(mock_client):
+    """Test query URN detection with various formats."""
+
+    # Mock response
+    mock_response = {
+        "entity": {
+            "urn": "urn:li:query:test",
+            "type": "QUERY",
+            "properties": {
+                "source": "MANUAL",
+                "statement": {"value": "SELECT 1", "language": "SQL"},
+            },
+            "platform": {"name": "bigquery"},
+            "subjects": [],
+        }
+    }
+
+    mock_client._graph.exists.return_value = True
+    mock_client._graph.url_for = lambda x: f"https://example.com/{x}"
+
+    # Test various query URN formats
+    test_urns = [
+        "urn:li:query:simple",
+        "urn:li:query:abc123def456",
+        "urn:li:query:e039cdc97f9c2f66e3223691eb21d3633b2d49088c3fb761ce1574980b2549ee",
+    ]
+
+    for test_urn in test_urns:
+        mock_response["entity"]["urn"] = test_urn
+
+        with patch(
+            "orrery_integrations.mcp.graphql_helpers.execute_graphql",
+            side_effect=[mock_response, {"entity": {}}],
+        ) as mock_gql:
+            with with_orrery_client(mock_client):
+                result = get_entities(test_urn)
+
+        # Verify GetQueryEntity was used (first call)
+        assert mock_gql.call_count == 2
+        call_kwargs = mock_gql.call_args_list[0][1]
+        assert call_kwargs["operation_name"] == "GetQueryEntity"
+        assert result["urn"] == test_urn
+
+
+def test_get_entities_query_returns_custom_properties(mock_client):
+    """Custom properties on a Query entity are passed through to the tool result."""
+
+    query_urn = "urn:li:query:with-custom-props"
+
+    mock_response = {
+        "entity": {
+            "urn": query_urn,
+            "type": "QUERY",
+            "properties": {
+                "name": "Agent Query",
+                "source": "SYSTEM",
+                "statement": {"value": "SELECT 1", "language": "SQL"},
+                "customProperties": [
+                    {"key": "agent_intent", "value": "daily_revenue"},
+                    {"key": "owner_team", "value": "finance"},
+                ],
+            },
+            "platform": {"urn": "urn:li:dataPlatform:trino", "name": "trino"},
+        }
+    }
+
+    mock_client._graph.exists.return_value = True
+    mock_client._graph.url_for = lambda x: f"https://example.com/{x}"
+
+    with patch(
+        "orrery_integrations.mcp.graphql_helpers.execute_graphql",
+        side_effect=[mock_response, {"entity": {}}],
+    ) as mock_gql:
+        with with_orrery_client(mock_client):
+            result = get_entities(query_urn)
+
+    # The GraphQL document sent to the server must request customProperties
+    sent_query = mock_gql.call_args_list[0][1]["query"]
+    assert "customProperties" in sent_query
+
+    assert result["properties"]["customProperties"] == [
+        {"key": "agent_intent", "value": "daily_revenue"},
+        {"key": "owner_team", "value": "finance"},
+    ]

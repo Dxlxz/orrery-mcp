@@ -1,0 +1,237 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: make setup
+
+      - name: Checks
+        run: make lint-check
+
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: make setup
+
+      - name: Run unit tests
+        run: uv run pytest tests/test_mcp/ -v
+
+  docker-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg VERSION=1.2.3 \
+            --build-arg VCS_REF=${{ github.sha }} \
+            --tag orrery-mcp:test \
+            .
+
+      - name: Verify version and health check
+        run: |
+          reported_version=$(docker run --rm --entrypoint orrery-mcp-http orrery-mcp:test --version)
+          test "$reported_version" = "orrery-mcp-http, version 1.2.3"
+          docker run --rm --entrypoint sh orrery-mcp:test \
+            -c '! command -v uv'
+
+          container_id=$(docker run --detach \
+            --env ORRERY_GMS_URL=http://orrery.example \
+            --env ORRERY_TELEMETRY_ENABLED=false \
+            --env FASTMCP_PORT=8123 \
+            --health-interval=1s \
+            --publish 127.0.0.1:18123:8123 \
+            orrery-mcp:test)
+          trap 'docker rm --force "$container_id"' EXIT
+
+          healthy=false
+          for attempt in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$container_id")
+            if [ "$status" = "healthy" ]; then
+              healthy=true
+              break
+            fi
+            if [ "$status" = "unhealthy" ]; then
+              docker logs "$container_id"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if [ "$healthy" != "true" ]; then
+            docker logs "$container_id"
+            exit 1
+          fi
+
+          curl --fail --silent --show-error http://127.0.0.1:18123/health
+
+      - name: Start stub GMS
+        run: python scripts/docker_auth_stub.py & echo $! > /tmp/docker-auth-stub.pid
+
+      - name: Call authenticated tool through image
+        run: |
+          container_id=$(docker run --detach \
+            --add-host host.docker.internal:host-gateway \
+            --env ORRERY_GMS_URL=http://host.docker.internal:18080 \
+            --env ORRERY_TELEMETRY_ENABLED=false \
+            --env FASTMCP_PORT=8124 \
+            --publish 127.0.0.1:18124:8124 \
+            orrery-mcp:test)
+          trap 'docker rm --force "$container_id"; kill "$(cat /tmp/docker-auth-stub.pid)"' EXIT
+          healthy=false
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:18124/health >/dev/null; then
+              healthy=true
+              break
+            fi
+            sleep 1
+          done
+          test "$healthy" = true
+          docker run --rm --network host --entrypoint python orrery-mcp:test - <<'PY'
+          import asyncio
+
+          from fastmcp import Client
+          from fastmcp.client.transports import StreamableHttpTransport
+
+          async def main() -> None:
+              transport = StreamableHttpTransport(
+                  "http://127.0.0.1:18124/mcp",
+                  headers={"Authorization": "Bearer ci-token"},
+              )
+              async with Client(transport) as client:
+                  result = await client.call_tool("get_me", {})
+                  assert not result.is_error, result
+
+          asyncio.run(main())
+          PY
+
+  integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          # Test against longtail (Cloud instance)
+          - test_env: "longtail"
+            orrery_version: "cloud"
+          # Test against OSS quickstart
+          - test_env: "oss"
+            orrery_version: "v1.3.0"
+          - test_env: "oss"
+            orrery_version: "head"
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      # OSS-specific: Install Orrery CLI and start quickstart
+      - name: Install Orrery CLI (OSS only)
+        if: matrix.test_env == 'oss'
+        run: |
+          python -m pip install --upgrade pip
+          pip install orrery
+
+      - name: Start Orrery Quickstart (OSS only)
+        if: matrix.test_env == 'oss'
+        env:
+          ORRERY_TOKEN_SERVICE_SIGNING_KEY: "test_signing_key_for_ci"
+          ORRERY_TOKEN_SERVICE_SALT: "test_salt_for_ci"
+        run: |
+          orrery docker quickstart --version ${{ matrix.orrery_version }}
+          orrery docker check
+
+      # Ingest and wait for ingestion to complete (OSS only)
+      - name: Ingest sample data (OSS only)
+        if: matrix.test_env == 'oss'
+        env:
+          ORRERY_GMS_URL: "http://localhost:8080"
+          ORRERY_GMS_TOKEN: ""
+        run: |
+          orrery docker ingest-sample-data
+          orrery ingest mcps tests/addon_bootstrap_mce.json
+          python scripts/wait_for_ingestion.py
+
+      # Setup MCP server dependencies
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install MCP Server dependencies
+        run: make setup
+
+      # Run tests based on environment
+      - name: Run integration tests (longtail)
+        if: matrix.test_env == 'longtail'
+        env:
+          ORRERY_GMS_URL: ${{ secrets.LONGTAIL_GMS_URL }}
+          ORRERY_GMS_TOKEN: ${{ secrets.LONGTAIL_GMS_TOKEN }}
+        run: |
+          uv run pytest tests/test_mcp_integration.py -v --timeout=120
+
+      - name: Run HTTP integration tests (longtail)
+        if: matrix.test_env == 'longtail'
+        env:
+          ORRERY_GMS_URL: ${{ secrets.LONGTAIL_GMS_URL }}
+          ORRERY_GMS_TOKEN: ${{ secrets.LONGTAIL_GMS_TOKEN }}
+          MCP_TRANSPORT: "http"
+        run: |
+          uv run pytest tests/test_mcp_integration.py -v --timeout=120
+
+      - name: Run integration tests (OSS)
+        if: matrix.test_env == 'oss'
+        env:
+          ORRERY_GMS_URL: "http://localhost:8080"
+          ORRERY_GMS_TOKEN: ""
+        run: |
+          uv run pytest tests/test_mcp_integration.py -v --timeout=120
+
+      - name: Run HTTP integration tests (OSS)
+        if: matrix.test_env == 'oss'
+        env:
+          ORRERY_GMS_URL: "http://localhost:8080"
+          # Quickstart has GMS auth disabled, but HTTP mode still requires a
+          # non-empty bearer token at the MCP boundary.
+          ORRERY_GMS_TOKEN: "ci-token"
+          MCP_TRANSPORT: "http"
+        run: |
+          uv run pytest tests/test_mcp_integration.py -v --timeout=120
+
+      # Cleanup
+      - name: Cleanup Orrery (OSS only)
+        if: always() && matrix.test_env == 'oss'
+        run: |
+          orrery docker nuke || true

@@ -1,0 +1,384 @@
+# Changelog
+
+All notable changes to orrery-mcp will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- `get_entities` returns assertion run values and more definitions. Each run in
+  `runEvents` carries `rowCount`, `missingCount`, `unexpectedCount`, `error` (with
+  its `properties`, where OSS servers put the message) and `severity`, and the
+  block counts `errored` runs. `info` now includes freshness, schema and custom
+  definitions (custom ones with `operator`, `parameters`, `scope`, `aggregation`,
+  `fields`, `nativeType`, `nativeParameters`) and `customProperties`. Assertion
+  URNs use their own query, so on a server older than these fields only that
+  query falls back, and other lookups keep their newer fields. Run
+  `nativeResults` and error `properties`, `nativeParameters` and
+  `customProperties` are capped at `MAX_ASSERTION_KEY_VALUE_ENTRIES` keys (10)
+  and `MAX_ASSERTION_KEY_VALUE_CHARS` characters per value (200), with
+  `<name>Total` when keys are cut.
+- `get_dataset_assertions` keeps each run's observed values, severity and capped
+  `nativeResults` in `runHistory`, returns capped `customProperties` as a dict
+  and the same custom definition fields, and adds `errored` to `runSummary`.
+- `get_entities` on a data contract URN returns its `status` and its freshness,
+  schema and data quality member assertions, each with its latest completed run.
+  The tool description tells agents how to judge a contract from these. Data
+  quality members are capped at `MAX_CONTRACT_DATA_QUALITY_ASSERTIONS` (25),
+  failing and erroring ones first, with `dataQualityTotal` when cut.
+- `get_aspect_history` returns `compactLineage` for a current `upstreamLineage`
+  value too large to return whole. It lists each dataset URN once and refers to
+  columns as `[datasetIndex, fieldPath]`, so when `truncated` is false one call
+  returns every mapping instead of one `get_lineage` call per column. It is capped
+  at `MAX_COMPACT_LINEAGE_CHARS` (24,000 compact JSON characters) and reports the
+  total mapping count.
+- `get_entities` and `get_dataset_queries` now return `customProperties` and `origin`
+  for Query entities, so structured key/value metadata attached to a query is visible
+  to agents.
+- `get_entities` now returns `customProperties`, `structuredProperties` and `ownership`
+  for every entity type whose GraphQL type supports them. Previously these were
+  missing for Dashboard, Chart, Container, Domain, DataProduct, GlossaryTerm,
+  GlossaryNode, CorpUser, CorpGroup, Tag and the ML entities. DataProduct also
+  gains `tags` and `glossaryTerms`.
+- `FIELD_DESCRIPTION_LENGTH_LIMIT` (default `120`) makes the per-schema-field
+  description limit configurable. It also covers a field's edited description and
+  its deprecation note, which were hardcoded to the same 120 characters.
+- `SearchFlagsOverride`, injected through `ToolContext` the way `ViewPreference` is, merges GraphQL `searchFlags` over a query's defaults for one request. The lineage tools (`get_lineage` and `get_lineage_paths_between`) honor it, so a caller running the tools can inject `SearchFlagsOverride({"skipCache": True})` to read lineage past Orrery's lineage search cache before acting on it. Other search tools do not consume it yet. No tool parameters change.
+- `list_schema_fields` now returns structured properties (e.g. `ai_context.*`)
+  for each schema field, so column-scoped properties written via
+  `add_structured_properties` can be read back through the MCP server instead of
+  requiring raw GraphQL. Keyword filtering matches against those values as well.
+  `get_entities` responses are unchanged; the per-value character cap is
+  configurable via `FIELD_STRUCTURED_PROPERTY_CHAR_LIMIT` (default 1000) and the
+  per-property value count via `FIELD_STRUCTURED_PROPERTY_MAX_VALUES` (default 25).
+- A non-root Docker image, Docker Compose configuration, public `GET /health`
+  endpoint, and multi-architecture Docker Hub/GHCR release workflow.
+
+### Changed
+
+- **Breaking for HTTP deployments:** HTTP now uses the separate
+  `orrery-mcp-http` entry point and requires each MCP client to provide
+  its own Orrery bearer token. `ORRERY_GMS_TOKEN` remains supported by the
+  local stdio and SSE transports; HTTP refuses to start when it is set.
+- The minimum `orrery` version is now `1.7.0.6` (was `1.3.1.7`). If you
+  pin an older `orrery` alongside this package, you must upgrade it.
+- `get_aspect_history`: an oversized current `upstreamLineage` value now carries
+  `compactLineage` instead of `valuePreview`, unless the projection does not fit
+  the response budget. Read `compactLineage`, then `valuePreview`, then `value`.
+  Oversized historical values keep `valuePreview`.
+
+### Fixed
+
+- `get_aspect_history` pages requested with `from_version` no longer come back
+  with an empty history and an unchanged `nextFromVersion` when the response
+  budget is short. If no history fits next to `current`, `current` is left out,
+  with `page.currentOmittedByResponseBudget: true`; if no history entry fits at
+  all, the pair is listed in `batch.droppedPairs`. Retry it alone; an entry larger
+  than the whole budget still cannot be returned.
+- Tool calls no longer stall for about 54 seconds when the telemetry endpoint is
+  unreachable. `orrery` 1.7.0.6 sends telemetry from a background worker
+  instead of on the calling thread.
+
+### Security
+
+- HTTP bearer tokens are verified against Orrery before MCP access is granted,
+  with a bounded positive cache and bounded concurrent validation.
+
+## [0.5.3] - 2026-03-09
+
+### Highlights — New SQL-like Filter Syntax
+
+The `search` and `get_lineage` tools now accept a **human-readable, SQL-like filter string** instead of the previous nested JSON dict. This is the headline change of this release — it makes filters dramatically easier for LLM agents (and humans) to write correctly.
+
+Since MCP tools are discovered dynamically by LLM agents at the start of every session (they read the tool schema each time), this is **not a breaking change** — agents will automatically pick up the new `filter` parameter and its syntax documentation.
+
+**Before (0.5.x):**
+```python
+search(query="*", filters={"entity_type": ["DATASET"]})
+search(query="*", filters={"and": [{"platform": ["snowflake"]}, {"env": ["PROD"]}]})
+```
+
+**After (0.5.3):**
+```python
+search(query="*", filter="entity_type = dataset")
+search(query="*", filter="platform = snowflake AND env = PROD")
+```
+
+The new syntax supports:
+- Simple equality: `platform = snowflake`
+- IN lists: `platform IN (snowflake, bigquery, redshift)`
+- Boolean logic: `AND`, `OR`, `NOT`, parentheses
+- Comparisons: `columnCount > 10`, `columnCount >= 5`
+- Existence checks: `tag IS NOT NULL`, `owner IS NULL`
+- Complex expressions: `entity_type = dataset AND (platform = snowflake OR platform = bigquery) AND NOT env = DEV`
+
+Supported fields: `entity_type`, `entity_subtype`, `platform`, `domain`, `container`, `tag`, `glossary_term`, `owner`, `env`, `status`, `deprecated`, `hasActiveIncidents`, `hasFailingAssertions`, `columnCount`, and any custom field name.
+
+### Added
+
+- **`search_filter_parser`**: Full SQL-like filter parser with tokenizer and recursive-descent parser. Compiles human-readable filter strings into Orrery SDK `Filter` objects. Includes comprehensive `FILTER_DOCS` that is injected into the `search` and `get_lineage` tool descriptions so LLM agents always have the syntax reference available.
+- **Modular tool architecture**: Tools are now organized into dedicated modules under `tools/` (`search.py`, `entities.py`, `lineage.py`, `dataset_queries.py`, `assertions.py`) instead of being defined inline in `mcp_server.py`.
+- **`graphql_helpers`**: Extracted shared GraphQL execution logic, token budgeting, and response processing into a dedicated module.
+- **`tool_context`**: New module for tool-level context management.
+- **`view_preference`**: Configurable view preference system (`UseDefaultView`, `NoView`, `CustomView`) for controlling which Orrery view is applied during search.
+- **`tools/assertions.py`**: New tool module for data quality assertion checks.
+
+### Changed
+
+- **`search` tool**: The `filters` parameter (JSON dict) is replaced by `filter` (string). See highlights section above.
+- **`get_lineage` tool**: Also uses the new string-based `filter` parameter for filtering lineage results.
+- **`mcp_server.py`**: Significantly slimmed down — tool implementations moved to dedicated modules, GraphQL helpers extracted, filter parsing extracted.
+- **Smoke check safety**: `smoke_check.py` now refuses to run against non-localhost Orrery instances to prevent accidental mutation of production data.
+
+### Removed
+
+- **`test_custom_filter_conversion.py`**: Removed obsolete test for the old dict-based filter format, replaced by `search_filter_parser`.
+
+---
+
+## [0.5.2] - 2026-02-24
+
+### Fixed
+
+- **HTTP transport ContextVar propagation**: Fixed `LookupError` for `_mcp_dh_client` ContextVar when running with HTTP transport (`stateless_http=True`). Each HTTP request runs in a separate async context that doesn't inherit ContextVars from the main thread, causing `DocumentToolsMiddleware` and `VersionFilterMiddleware` to fail. Added `_OrreryClientMiddleware` that sets the ContextVar at the start of every MCP message.
+- **`create_app()` initialization safety**: The `_app_initialized` flag is now set only after all middleware is successfully added, so a failed setup can be retried.
+- **`--debug` middleware ordering**: `LoggingMiddleware` is now added before other middlewares so it wraps the full request/response lifecycle for maximum visibility.
+
+### Added
+
+- **`create_app()` factory function**: Extracted server setup into a factory function so that `fastmcp dev` / `fastmcp run` work correctly (they import the module but never call `main()`).
+- **Multi-mode smoke testing**: `smoke_check.py` now supports `--url` and `--stdio-cmd` options to test against running HTTP/SSE servers or stdio subprocesses, in addition to the default in-process mode.
+- **`test_all_modes.sh` orchestrator**: Runs smoke checks across all 5 transport modes (in-process, HTTP, SSE, stdio, `fastmcp run`), with per-mode log capture to `scripts/logs/`.
+- **`SMOKE_CHECK.md`**: Documentation with step-by-step reproduction instructions for all transport modes.
+- **Core tool validation**: Smoke check now verifies that all 8 core read-only tools are present, catching silent regressions in tool registration or middleware filtering.
+
+---
+
+## [0.5.1] - 2026-02-11
+
+### Fixed
+
+- **`list_schema_fields`**: Fixed crash (`'NoneType' object has no attribute 'get'`) when a dataset has no schema metadata. Now gracefully returns an empty fields list.
+- **`save_document`**: Errors (e.g., authorization failures) are now raised as exceptions instead of being silently returned in the response body. This ensures LLM agents see the actual error message.
+- **`update_description`**: Hidden from OSS instances where entity-level description updates are not supported. Available on Cloud only.
+
+### Added
+
+- **`scripts/smoke_check.py`**: Comprehensive smoke check script that exercises all available MCP tools against a live Orrery instance. Discovers URNs dynamically, respects version filtering middleware, and tests mutation tools with add-then-remove pairs. Supports `--all`, `--mutations`, `--user`, and `--urn` options.
+
+### Changed
+
+- **Version-aware tool filtering**: `update_description` now requires Cloud (`@min_version(cloud="0.3.16")`), previously also allowed on OSS >= 1.4.0.
+
+---
+
+## [0.5.0] - 2026-01-30
+
+### Added
+
+#### Mutation Tools
+New tools for modifying metadata in Orrery. Enabled via `TOOLS_IS_MUTATION_ENABLED=true` environment variable.
+
+- **`add_tags` / `remove_tags`**: Add or remove tags from entities or schema fields (columns). Supports bulk operations on multiple entities.
+- **`add_terms` / `remove_terms`**: Add or remove glossary terms from entities or schema fields. Useful for applying business definitions and data classification.
+- **`add_owners` / `remove_owners`**: Add or remove ownership assignments from entities. Supports different ownership types (technical owner, data owner, etc.).
+- **`set_domains` / `remove_domains`**: Assign or remove domain membership for entities. Each entity can belong to one domain.
+- **`update_description`**: Update, append to, or remove descriptions for entities or schema fields. Supports markdown formatting.
+- **`add_structured_properties` / `remove_structured_properties`**: Manage structured properties (typed metadata fields) on entities. Supports string, number, URN, date, and rich text value types.
+
+#### User Tools
+New tools for user information. Enabled via `TOOLS_IS_USER_ENABLED=true` environment variable.
+
+- **`get_me`**: Retrieve information about the currently authenticated user, including profile details and group memberships.
+
+#### Document Tools
+New tools for working with documents (knowledge articles, runbooks, FAQs) stored in Orrery. Document tools are automatically hidden if no documents exist in the catalog.
+
+- **`search_documents`**: Search for documents using keyword search with filters for platforms, domains, tags, glossary terms, and owners.
+- **`grep_documents`**: Search within document content using regex patterns. Useful for finding specific information across multiple documents.
+- **`save_document`**: Save standalone documents (insights, decisions, FAQs, notes) to Orrery's knowledge base. Documents are organized under a configurable parent folder.
+
+#### Document Tools Middleware
+- **New `DocumentToolsMiddleware`** that automatically hides document tools when no documents exist in the catalog
+- Prevents confusion by only showing relevant tools
+- Cached document existence check (1-minute TTL) to avoid repeated queries
+- Can be completely disabled via `ORRERY_MCP_DOCUMENT_TOOLS_DISABLED=true`
+
+#### Semantic Search Support
+- **`SEMANTIC_SEARCH_ENABLED`** environment variable to enable AI-powered semantic search
+
+### Changed
+
+- **Python version requirement**: Now requires Python 3.11+ (previously 3.10+)
+- **Upgraded `orrery`**: Now requires `>=1.3.1.7` (previously `==1.2.0.2`)
+- **Upgraded `fastmcp`**: Now requires `>=2.14.5,<3` (previously `>=2.10.5`). Includes middleware type fixes, MCP SDK 1.26.0 compatibility, and background task support.
+- **Relaxed `pydantic` pin**: Now allows `>=2.0,<3` (previously `>=2.0,<2.12`)
+- **Updated development instructions**: `fastmcp dev` replaces `mcp dev` for the MCP inspector
+
+### Security
+
+- **Added** `SECURITY.md` with vulnerability reporting guidelines
+- **Bumped** `authlib` from 1.6.0 to 1.6.6 (security fixes)
+- **Bumped** `urllib3` from 2.4.0 to 2.6.3
+- **Bumped** `aiohttp` from 3.12.7 to 3.13.3
+- **Bumped** `python-multipart` from 0.0.20 to 0.0.22
+
+### Dependencies
+
+- **Added** `json-repair`: For robust JSON parsing
+- **Added** `google-re2`: For efficient regex operations in document grep
+
+### Environment Variables (New in 0.5.0)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TOOLS_IS_MUTATION_ENABLED` | `false` | Enable mutation tools (add/remove tags, owners, etc.) |
+| `TOOLS_IS_USER_ENABLED` | `false` | Enable user tools (get_me) |
+| `ORRERY_MCP_DOCUMENT_TOOLS_DISABLED` | `false` | Completely disable document tools |
+| `SAVE_DOCUMENT_TOOL_ENABLED` | `true` | Enable/disable the save_document tool |
+| `SAVE_DOCUMENT_PARENT_TITLE` | `Shared` | Title for the parent folder of saved documents |
+| `SAVE_DOCUMENT_ORGANIZE_BY_USER` | `false` | Organize saved documents by user |
+| `SAVE_DOCUMENT_RESTRICT_UPDATES` | `true` | Only allow updating documents in the shared folder |
+| `SEMANTIC_SEARCH_ENABLED` | `false` | Enable semantic (AI-powered) search |
+
+---
+
+## [0.4.0] - 2025-11-17
+
+### Added
+
+#### Response Token Budget Management
+- **New `TokenCountEstimator` class** for fast token counting using character-based heuristics
+- **Automatic result truncation** via `_select_results_within_budget()` to prevent context window issues
+- **Configurable token limits**:
+  - `TOOL_RESPONSE_TOKEN_LIMIT` environment variable (default: 80,000 tokens)
+  - `ENTITY_SCHEMA_TOKEN_BUDGET` environment variable (default: 16,000 tokens per entity)
+- **90% safety buffer** to account for token estimation inaccuracies
+- Ensures at least one result is always returned
+
+#### Enhanced Search Capabilities
+- **Enhanced Keyword Search**:
+  - Supports pagination with `start` parameter
+  - Added `viewUrn` for view-based filtering
+  - Added `sortInput` for custom sorting
+
+#### Query Entity Support
+- **Native QueryEntity type support** (SQL queries as first-class entities)
+- New `query_entity.gql` GraphQL query
+- Optimized entity retrieval with specialized query for QueryEntity types
+- Includes query statement, subjects (datasets/fields), and platform information
+
+#### GraphQL Compatibility
+- **Adaptive field detection** for newer GMS versions
+- Caching mechanism for GMS version detection
+- Graceful fallback when newer fields aren't available
+- Support for `#[CLOUD]` and `#[NEWER_GMS]` conditional field markers
+- `DISABLE_NEWER_GMS_FIELD_DETECTION` environment variable override
+
+#### Schema Field Optimization
+- **Smart field prioritization** to stay within token budgets:
+  1. Primary key fields (`isPartOfKey=true`)
+  2. Partitioning key fields (`isPartitioningKey=true`)
+  3. Fields with descriptions
+  4. Fields with tags or glossary terms
+  5. Alphabetically by field path
+- Generator-based approach for memory efficiency
+
+#### Error Handling & Security
+- **Enhanced error logging** with full stack traces in `async_background` wrapper
+- Logs function name, args, and kwargs on failures
+- **ReDoS protection** in HTML sanitization with bounded regex patterns
+- **Query truncation** function (configurable via `QUERY_LENGTH_HARD_LIMIT`, default: 5,000 chars)
+
+#### Default Views Support
+- **Automatic default view application** for all search operations
+- Fetches organization's default global view from Orrery
+- **5-minute caching** (configurable via `VIEW_CACHE_TTL_SECONDS`)
+- Can be disabled via `ORRERY_MCP_DISABLE_DEFAULT_VIEW` environment variable
+- Ensures search results respect organization's data governance policies
+
+### Dependencies
+
+- **Added** `cachetools>=5.0.0`: For GMS field detection caching
+- **Added** `types-cachetools` (dev): Type stubs for mypy
+
+### Performance
+
+- **Memory efficiency**: Generator-based result selection avoids loading all results into memory
+- **Caching**: GMS version detection cached per graph instance
+- **Fast token estimation**: Character-based heuristic (no tokenizer overhead)
+- **Smart truncation**: Truncates less important schema fields first
+
+---
+
+## [0.3.11] and earlier
+
+See git history for changes in earlier versions.
+
+---
+
+## Migration Guide
+
+### Environment Variables (New in 0.5.0)
+
+```bash
+# Enable mutation tools (add/remove tags, owners, terms, etc.)
+export TOOLS_IS_MUTATION_ENABLED=true
+
+# Enable user tools (get_me)
+export TOOLS_IS_USER_ENABLED=true
+
+# Disable document tools if they impact chatbot behavior
+export ORRERY_MCP_DOCUMENT_TOOLS_DISABLED=true
+
+# Configure save_document behavior
+export SAVE_DOCUMENT_PARENT_TITLE="Shared"
+export SAVE_DOCUMENT_ORGANIZE_BY_USER=false
+export SAVE_DOCUMENT_RESTRICT_UPDATES=true
+
+# Enable semantic search
+export SEMANTIC_SEARCH_ENABLED=true
+```
+
+### Environment Variables (New in 0.4.0)
+
+```bash
+# Configure token limits (optional)
+export TOOL_RESPONSE_TOKEN_LIMIT=80000
+export ENTITY_SCHEMA_TOKEN_BUDGET=16000
+
+# Disable newer GMS field detection if needed
+export DISABLE_NEWER_GMS_FIELD_DETECTION=true
+
+# Disable default view application (optional)
+export ORRERY_MCP_DISABLE_DEFAULT_VIEW=true
+```
+
+### Search Examples (New in 0.4.0)
+
+```python
+# Keyword search with filters
+result = search(
+    query="/q revenue_*",
+    filters={"entity_type": ["DATASET"]},
+    num_results=10
+)
+
+# Search with view filtering and sorting
+result = search(
+    query="customer data",
+    viewUrn="urn:li:orreryView:...",
+    sortInput={"sortBy": "RELEVANCE", "sortOrder": "DESCENDING"},
+    num_results=10
+)
+```
+
+---
+
+## Questions or Issues?
+
+- Open an issue: https://github.com/Dxlxz/orrery-mcp/issues
+- Documentation: https://docs.orrery.com/docs/features/feature-guides/mcp

@@ -1,0 +1,127 @@
+# Note: The following entity types are not currently included:
+# - DataJob
+# - DataFlow
+# - ML entities (MLModel, MLModelGroup, MLFeature, MLFeatureTable, MLPrimaryKey)
+# - Tag
+# - StructuredProperty
+# - CorpUser
+# - CorpGroup
+
+fragment SearchEntityInfo on Entity {
+  urn
+
+  # For some entity types, the urns are not human-readable. For those,
+  # we pull the name as well.
+  ... on Dataset {
+    properties {
+      name
+    }
+  }
+  ... on Chart {
+    properties {
+      name
+    }
+  }
+  ... on Dashboard {
+    properties {
+      name
+    }
+  }
+  ... on Container {
+    properties {
+      name
+    }
+  }
+  ... on GlossaryTerm {
+    properties {
+      name
+    }
+  }
+  ... on GlossaryNode {
+    properties {
+      name
+    }
+  }
+  ... on Domain {
+    properties {
+      name
+    }
+  }
+  ... on DataProduct {
+    properties {
+      name
+    }
+  }
+}
+
+fragment FacetEntityInfo on Entity {
+  ... on Dataset {
+    name
+    properties {
+      name
+    }
+  }
+  ... on Container {
+    subTypes {
+      typeNames
+    }
+    properties {
+      name
+    }
+  }
+  ... on GlossaryTerm {
+    properties {
+      name
+    }
+  }
+}
+
+query search(
+  $types: [EntityType!]
+  $query: String!
+  $orFilters: [AndFilterInput!]
+  $count: Int!
+  $start: Int!
+  $viewUrn: String
+  $sortInput: SearchSortInput
+) {
+  searchAcrossEntities(
+    input: {
+      query: $query
+      count: $count
+      start: $start
+      types: $types
+      orFilters: $orFilters
+      viewUrn: $viewUrn
+      sortInput: $sortInput
+      searchFlags: { skipHighlighting: true, maxAggValues: 5 }
+    }
+  ) {
+    start
+    count
+    total
+    searchResults {
+      entity {
+        ...SearchEntityInfo
+      }
+      # TODO: Consider adding these fields for enhanced search experience:
+      # score               # BM25 score for keyword search relevance
+    }
+    facets {
+      field
+      displayName
+      aggregations {
+        value
+        count
+        displayName
+        entity {
+          ...FacetEntityInfo
+        }
+      }
+    }
+    # TODO: Consider adding metadata section for search algorithm transparency:
+    # metadata {
+    #   scoringMethod       # e.g., "BM25" vs "COSINE_SIMILARITY"
+    # }
+  }
+}

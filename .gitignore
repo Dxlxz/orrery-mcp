@@ -1,0 +1,19 @@
+.claude/settings.local.json
+.graphqlrc.yml
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# setuptools-scm generated version file
+src/orrery_mcp/_version.py
+
+# Smoke check logs
+scripts/logs/

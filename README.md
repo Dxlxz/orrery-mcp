@@ -1,0 +1,390 @@
+# Orrery MCP Server
+
+A [Model Context Protocol](https://modelcontextprotocol.io/) server implementation for [Orrery](https://orrery.com/).
+
+## What is Orrery?
+
+[Orrery](https://orrery.com/) is an open-source context platform that gives organizations a single pane of glass across their entire data supply chain. Orrery unifies data discovery, governance, and observability under one roof for every table, column, dashboard pipeline, document, and ML Model. 
+
+With powerful features for data profiling, data quality monitoring, data lineage, data ownership, and data classification, Orrery brings together both technical and organizational context, allowing teams to find, create, use, and maintain trustworthy data. 
+
+## Use Cases
+
+The Orrery MCP Server enables AI agents to:
+
+- **Find trustworthy data**: Search across the entire data landscape using natural language to find the tables, columns, dashboards, & metrics that can answer your most mission-critical questions. Leverage trust signals like data popularity, quality, lineage, and query history to get it right, every time. 
+
+- **Explore data lineage & plan for data changes**: Understand the impact of important data changes _before_ they impact your downstream users through rich data lineage at the asset & column level. 
+
+- **Understand your business**: Navigate important organizational context like business glossaries, data domains, data products products, _and_ data assets. Understand how key metrics, business processes, and data relate to one another. 
+
+- **Explain & generate SQL queries**: Generate accurate SQL queries to answer your most important questions with the help of critical context like data documentation, data lineage, and popular queries across the organization. 
+
+## Why Orrery MCP Server?
+
+With Orrery MCP Server, you can instantly give AI agents visibility into of your entire data ecosystem. Find and understand data stored in your databases, data lake, data warehouse, and BI visualization tools. Explore data lineage, understand usage & use cases, identify the data experts, and generate SQL - all through natural language. 
+
+###  **Structured Search with Context Filtering**
+
+Go beyond keyword matching with powerful query & filtering syntax:
+
+- Wildcard matching: `/q revenue_*` finds `revenue_kpis`, `revenue_daily`, `revenue_forecast`
+- Field searches: `/q tag:PII` finds all PII-tagged data
+- Boolean logic: `/q (sales OR revenue) AND quarterly` for complex queries
+
+###  **SQL Intelligence & Query Generation**
+
+Access popular SQL queries, and generate new ones with accuracy:
+
+- See how analysts query tables (perfect for SQL generation)
+- Understand join patterns and common filters
+- Learn from production query patterns
+
+###  **Table & Column-Level Lineage**
+
+Trace data flow at both the table and column level:
+
+- Track how `user_id` becomes `customer_key` downstream
+- Understand transformation logic
+- Upstream and downstream exploration (1-3+ hops)
+- Handle enterprise-scale lineage graphs
+
+
+###  **Understands Your Data Ecosystem**
+
+Understand how your data is organized before searching:
+
+- Discover relevant data domains, owners, tags and glossary terms
+- Browse across data platforms and environments
+- Navigate the complexities of your data landscape without guessing
+
+## Usage
+
+See instructions in the [Orrery MCP server docs](https://docs.orrery.com/docs/features/feature-guides/mcp).
+
+### Local stdio deployment
+
+The default transport remains stdio for local MCP clients:
+
+```bash
+uvx orrery-mcp
+```
+
+The stdio server loads `ORRERY_GMS_URL` and `ORRERY_GMS_TOKEN` from the
+environment, falling back to `~/.orreryenv` created by `orrery init`. This is
+the local deployment mode and does not require HTTP authentication.
+
+The local CLI also supports SSE for trusted, local-network use. SSE does not
+provide the per-request bearer authentication used by the dedicated HTTP
+entry point and should not be exposed as a shared network service.
+
+### Docker HTTP deployment
+
+The container runs the stateless HTTP transport on port 8000. It deliberately
+does not use a server-wide `ORRERY_GMS_TOKEN`; each MCP client supplies its own
+Orrery token so Orrery permissions and audit identity are preserved per user.
+
+> **Breaking change for existing HTTP deployments:** HTTP now has a separate
+> `orrery-mcp-http` entry point. It refuses to start when
+> `ORRERY_GMS_TOKEN` is configured, and every client must send its own Orrery
+> bearer token. Local stdio and SSE behavior are unchanged.
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e ORRERY_GMS_URL=https://your-orrery.example \
+  Dxlxz/orrery-mcp:latest
+```
+
+The same isolated HTTP entry point is available outside Docker:
+
+```bash
+ORRERY_GMS_URL=https://your-orrery.example orrery-mcp-http
+```
+
+Connect to `http://localhost:8000/mcp` and include the token on every request:
+
+```text
+Authorization: Bearer <orrery-personal-access-token>
+```
+
+Tokens are accepted only in the `Authorization` header; query-string tokens
+such as `?access_token=...` are rejected.
+
+Orrery must have `METADATA_SERVICE_AUTH_ENABLED=true` to establish caller
+identity. When upstream auth is disabled, GMS may return a synthetic,
+non-existent actor for arbitrary bearer values; the MCP server cannot correct
+that upstream configuration.
+
+For a local build, create a `.env` file containing `ORRERY_GMS_URL`, then run:
+
+```bash
+docker compose up --build
+```
+
+The image and server expose an unauthenticated `GET /health` endpoint for
+container, load-balancer, and Kubernetes probes. The endpoint reports process
+health only and does not contact Orrery.
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+```
+
+Bearer tokens must be protected in transit. Terminate TLS and apply
+rate-limiting at an ingress or reverse proxy before exposing the HTTP deployment
+outside a trusted network. Rate limiting is especially important because each
+new invalid token can trigger a validation request to GMS.
+
+Successfully verified tokens and their Orrery clients are cached for five
+minutes. If a cached request receives a 401 or 403 from Orrery, that client is
+evicted and the next request revalidates the token. Failed validations are not
+cached; concurrent upstream validations are bounded to protect Orrery.
+
+## Demo
+
+Check out the [demo video](https://youtu.be/VXRvHIZ3Eww?t=1878), done in collaboration with the team at Block.
+
+## Tools
+
+The Orrery MCP Server provides the following tools:
+
+`search`
+
+Search Orrery using structured keyword search (/q syntax) with boolean logic, filters, pagination, and optional sorting by usage metrics.
+
+`get_lineage`
+
+Retrieve upstream or downstream lineage for any entity (datasets, columns, dashboards, etc.) with filtering, query-within-lineage, pagination, and hop control.
+
+`get_dataset_queries`
+
+Fetch real SQL queries referencing a dataset or column—manual or system-generated—to understand usage patterns, joins, filters, and aggregation behavior.
+
+`get_entities`
+
+Fetch detailed metadata for one or more entities by URN; supports batch retrieval for efficient inspection of search results.
+
+`get_aspect_history`
+
+Retrieve the current value and a bounded, newest-first page of retained historical versions for one or more entity/aspect pairs, with per-version ingestion and audit provenance.
+
+`list_schema_fields`
+
+List schema fields for a dataset with keyword filtering and pagination, useful when search results truncate fields or when exploring large schemas.
+
+`get_lineage_paths_between`
+
+Retrieve the exact lineage paths between two assets or columns, including intermediate transformations and SQL query information.
+
+### Mutation Tools
+
+These tools allow modifying metadata in Orrery. They are enabled via the `TOOLS_IS_MUTATION_ENABLED=true` environment variable.
+
+`add_tags` / `remove_tags`
+
+Add or remove tags from entities or schema fields (columns). Supports bulk operations on multiple entities.
+
+`add_terms` / `remove_terms`
+
+Add or remove glossary terms from entities or schema fields. Useful for applying business definitions and data classification.
+
+`add_owners` / `remove_owners`
+
+Add or remove ownership assignments from entities. Supports different ownership types (technical owner, data owner, etc.).
+
+`set_domains` / `remove_domains`
+
+Assign or remove domain membership for entities. Each entity can belong to one domain.
+
+`update_description`
+
+Update, append to, or remove descriptions for entities or schema fields. Supports markdown formatting.
+
+`add_structured_properties` / `remove_structured_properties`
+
+Manage structured properties (typed metadata fields) on entities. Supports string, number, URN, date, and rich text value types.
+
+### User Tools
+
+These tools provide information about the authenticated user. Enabled via `TOOLS_IS_USER_ENABLED=true`.
+
+`get_me`
+
+Retrieve information about the currently authenticated user, including profile details and group memberships.
+
+### Document Tools
+
+These tools work with documents (knowledge articles, runbooks, FAQs) stored in Orrery. Document tools are automatically hidden if no documents exist in the catalog.
+
+`search_documents`
+
+Search for documents using keyword search with filters for platforms, domains, tags, glossary terms, and owners.
+
+`grep_documents`
+
+Search within document content using regex patterns. Useful for finding specific information across multiple documents.
+
+`save_document`
+
+Save standalone documents (insights, decisions, FAQs, notes) to Orrery's knowledge base. Documents are organized under a configurable parent folder.
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORRERY_GMS_URL` | none | Orrery server URL. Required in HTTP mode; stdio can also load it from `~/.orreryenv`. |
+| `ORRERY_GMS_TOKEN` | none | Legacy stdio/SSE credential. HTTP mode refuses to start when this shared credential is set. |
+| `FASTMCP_HOST` | FastMCP default (`127.0.0.1`); image default (`0.0.0.0`) | HTTP/SSE bind address. |
+| `FASTMCP_PORT` | `8000` | HTTP/SSE listen port; also used by the image health check. |
+| `TOOLS_IS_MUTATION_ENABLED` | `false` | Enable mutation tools (add/remove tags, owners, etc.) |
+| `TOOLS_IS_USER_ENABLED` | `false` | Enable user tools (get_me) |
+| `ORRERY_MCP_DOCUMENT_TOOLS_DISABLED` | `false` | Completely disable document tools |
+| `SAVE_DOCUMENT_TOOL_ENABLED` | `true` | Enable or disable `save_document`. The tool is registered only when `TOOLS_IS_MUTATION_ENABLED=true`. |
+| `SAVE_DOCUMENT_PARENT_TITLE` | `Shared` | Title for the parent folder of saved documents |
+| `SAVE_DOCUMENT_ORGANIZE_BY_USER` | `false` | Organize saved documents by user |
+| `SAVE_DOCUMENT_RESTRICT_UPDATES` | `true` | Only allow updating documents in the shared folder |
+| `TOOL_RESPONSE_TOKEN_LIMIT` | `80000` | Maximum tokens for tool responses |
+| `QUERY_LENGTH_LIMIT` | `5000` | Maximum characters for SQL query statements and view definitions in tool responses |
+| `ENTITY_SCHEMA_TOKEN_BUDGET` | `16000` | Token budget per entity for schema fields |
+| `DESCRIPTION_LENGTH_LIMIT` | `5000` | Maximum characters for an entity-level description |
+| `FIELD_DESCRIPTION_LENGTH_LIMIT` | `120` | Maximum characters for a schema field's description, edited description and deprecation note |
+| `DOCUMENT_CONTENT_CHAR_LIMIT` | `8000` | Maximum characters for document content in tool responses |
+| `DISABLE_NEWER_GMS_FIELD_DETECTION` | `false` | Disable newer GMS fields. By default, tagged fields are tried on Core and Cloud, with a cached per-query fallback for older schemas. |
+| `ORRERY_MCP_DISABLE_DEFAULT_VIEW` | `false` | Disable automatic default view application |
+| `SEMANTIC_SEARCH_ENABLED` | `false` | Enable semantic (AI-powered) search |
+
+## Example: Data Discovery & Understanding Flow (for Agents Using Orrery Tools)
+
+This example illustrates how an AI agent could orchestrate Orrery MCP tools to answer a user's data question. It demonstrates the decision-making flow, which tools are called, and how responses are used.
+
+### 1. User Asks a Question
+
+**Example:**
+> "How can I find out how many pets were adopted last month?"
+
+The agent recognizes this as a **data discovery → query construction** workflow. It needs to (a) find relevant datasets, (b) inspect metadata, (c) construct a correct SQL query.
+
+### 2. Search for Relevant Datasets
+
+The agent begins with the `search` tool (semantic or keyword depending on configuration).
+
+**Tool:** `search`  
+**Input:** natural-language query
+
+**Example Call:**
+```json
+{
+  "query": "pet adoptions"
+}
+```
+
+**Purpose:** Identify datasets like `adoptions`, `pet_profiles`, `pet_details`.
+
+### 3. Inspect Candidate Datasets
+
+For each dataset returned by search, the agent may fetch metadata.
+
+#### 3.1 List Schema Fields
+
+**Tool:** `list_schema_fields`  
+**Input:** URN of dataset  
+**Purpose:** Understand schema, datatype, candidate fields for querying.
+
+Example:
+```json
+{
+  "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,mydb.public.adoptions,PROD)"
+}
+```
+
+`list_schema_fields` is paginated. A successful first response is not
+necessarily the complete schema: continue while `remainingCount` is greater
+than zero. Advance by the number of fields actually returned, not by the
+requested limit, because the response token budget can shorten a page:
+
+```text
+offset = 0
+all_fields = []
+
+do:
+    page = list_schema_fields(urn=dataset_urn, limit=100, offset=offset)
+    all_fields.extend(page.fields)
+    offset = page.offset + page.returned
+while page.remainingCount > 0
+```
+
+This pattern also terminates safely if an offset is already beyond the last
+field: the tool returns an empty page with `remainingCount: 0`.
+
+#### 3.2 Fetch Lineage (optional)
+
+**Tool:** `get_lineage`  
+**Purpose:** Determine whether dataset is derived or authoritative.
+
+#### 3.3 Get Example Queries
+
+**Tool:** `get_dataset_queries`  
+**Purpose:** Learn typical usage patterns and query templates for the dataset.
+
+### 4. Understand Entity Relationships
+
+If the question requires joining or entity navigation (e.g., connecting pets → adoptions):
+
+#### get_entities
+To retrieve entities related to a given URN, such as upstream/downstream tables.
+
+#### get_lineage_paths_between
+To calculate exact lineage paths between datasets if needed (e.g., between `pet_profiles` and `adoptions`).
+
+### 5. Construct a Query
+
+The agent now has:
+
+- The correct dataset
+- Its schema
+- Key fields
+- Sample queries
+- Relationship and lineage context
+
+The agent constructs an accurate SQL query.
+
+Example:
+
+```sql
+SELECT COUNT(*)
+FROM mydb.public.adoptions
+WHERE adoption_date >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1' MONTH)
+  AND adoption_date < DATE_TRUNC('month', CURRENT_DATE);
+```
+
+### 6. Return the Final Answer
+
+The agent may either:
+
+- return the SQL directly,
+- run it (if in an environment where query execution is allowed), or
+- provide a natural-language answer based on query output.
+
+### Summary of Tools Used
+
+| Tool Name | Purpose |
+|-----------|---------|
+| `search` | Find relevant datasets for the question. |
+| `list_schema_fields` | Understand dataset structure. |
+| `get_lineage` | Assess data authority and provenance. |
+| `get_dataset_queries` | Learn how the dataset is typically queried. |
+| `get_entities` | Retrieve related entities for context. |
+| `get_lineage_paths_between` | Understand deeper relationships between datasets. |
+
+
+## Developing
+
+See [DEVELOPING.md](DEVELOPING.md).
